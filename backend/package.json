@@ -14,6 +14,9 @@
     "test:block2": "tsx scripts/verify-block2.ts"
   },
   "dependencies": {
+    "@bull-board/api": "^9.10.4",
+    "@bull-board/express": "^9.10.4",
+    "@elastic/elasticsearch": "^8.19.2",
     "@prisma/client": "^5.22.0",
     "bullmq": "^5.21.2",
     "cors": "^2.8.5",

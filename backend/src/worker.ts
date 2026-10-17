@@ -9,38 +9,71 @@ import {
   undoRateLimitIncrement,
   onRateLimitHit,
 } from './lib/rateLimiter.js';
+import { indexOrUpdateEmail } from './lib/elasticsearch.js';
+import { recoverStuckSendingEmails } from './lib/crashRecovery.js';
 
 console.log(
   `⚙️  [BullMQ Worker] Initializing with concurrency: ${env.WORKER_CONCURRENCY}, ` +
-  `minDelayBetweenSends: ${env.MIN_DELAY_BETWEEN_SENDS_MS}ms`
+  `minDelayBetweenSends: ${env.MIN_DELAY_BETWEEN_SENDS_MS}ms, ` +
+  `sendingStaleMs: ${env.SENDING_STALE_MS}ms`
 );
+
+// Block 3 Crash Safety: On worker startup, reset rows stuck in "sending" > SENDING_STALE_MS back to "scheduled"
+recoverStuckSendingEmails().then((recoveredCount) => {
+  if (recoveredCount > 0) {
+    console.log(`🛡️  [BullMQ Worker] Startup crash recovery reset ${recoveredCount} orphaned email(s) to 'scheduled'.`);
+  }
+}).catch((err) => {
+  console.error('❌ [BullMQ Worker] Startup crash recovery encountered an error:', err);
+});
 
 /**
  * Worker processor function for dispatching emails via Ethereal SMTP.
  *
- * WHY Block 2 Design:
- * 1. Idempotency: Atomically transitions the email row from 'scheduled' -> 'sending'.
- *    If count is 0, another worker or duplicate execution already claimed it, preventing double send.
- * 2. Per-Sender Rate Limiting: Evaluates an atomic Lua script in Redis (rate:{senderId}:{hourWindow}).
- *    If over limit, job is NOT failed or dropped; it is moved to the start of the next hour window
- *    via job.moveToDelayed(nextHourTimestamp, token), and status is reset to 'scheduled'.
- * 3. Order Preservation: Rescheduled jobs receive an offset of (index * 100ms) to maintain relative order.
- * 4. Error Handling: Successful delivery marks row as 'sent'; unhandled errors mark row as 'failed' with error.
+ * Block 2 & Block 3 Design:
+ * 1. Idempotency & Crash-Safety: Atomically claims the row from 'scheduled' -> 'sending'.
+ *    If count is 0, checks if the email is a retried stalled job stuck in 'sending' > SENDING_STALE_MS.
+ * 2. Elasticsearch Tracking: Every lifecycle status transition (sending, sent, failed, scheduled/rescheduled)
+ *    is idempotently mirrored to Elasticsearch without blocking email delivery if ES is unreachable.
+ * 3. Per-Sender Rate Limiting: Evaluates atomic Redis Lua script (rate:{senderId}:{hourWindow}).
+ *    If over limit, job is moved to the next hour window via job.moveToDelayed(nextHourTimestamp, token).
+ * 4. Stalled Job Recovery: Worker listens to 'stalled' event and resets orphaned rows back to 'scheduled'.
  */
 async function processEmailJob(job: Job<EmailJobData>, token?: string): Promise<void> {
   const { emailId } = job.data;
   console.log(`\n📨 [Worker] Processing job #${job.id} for Email ID: ${emailId}`);
 
   // 1. Idempotency: Atomically claim the row from 'scheduled' -> 'sending'
-  const claim = await prisma.email.updateMany({
+  let claim = await prisma.email.updateMany({
     where: { id: emailId, status: 'scheduled' },
     data: { status: 'sending' },
   });
 
   if (claim.count === 0) {
-    console.log(`ℹ️  [Worker] Email ${emailId} already claimed or processed (count=0). Skipping duplicate.`);
-    return;
+    // Crash Safety Fallback: Check if this row is stuck in 'sending' for longer than SENDING_STALE_MS
+    const staleThreshold = new Date(Date.now() - env.SENDING_STALE_MS);
+    const reclaimed = await prisma.email.updateMany({
+      where: {
+        id: emailId,
+        status: 'sending',
+        updatedAt: { lt: staleThreshold },
+      },
+      data: { status: 'sending' },
+    });
+
+    if (reclaimed.count > 0) {
+      console.log(`♻️  [Worker] Recovered stale email ${emailId} from 'sending' state (crash-safety reclaim).`);
+    } else {
+      console.log(`ℹ️  [Worker] Email ${emailId} already claimed or processed (count=0). Skipping duplicate.`);
+      return;
+    }
   }
+
+  // Sync status transition to Elasticsearch (idempotent, non-blocking)
+  await indexOrUpdateEmail({
+    id: emailId,
+    status: 'sending',
+  });
 
   // 2. Fetch email and sender details
   const email = await prisma.email.findUnique({
@@ -82,6 +115,13 @@ async function processEmailJob(job: Job<EmailJobData>, token?: string): Promise<
       },
     });
 
+    // Mirror rescheduled status and updated scheduledAt in Elasticsearch
+    await indexOrUpdateEmail({
+      id: email.id,
+      status: 'scheduled',
+      scheduledAt: nextScheduledAt,
+    });
+
     // Move the same job to the delayed state in Redis using the worker lock token
     await job.moveToDelayed(nextScheduledAtMs, token);
 
@@ -117,15 +157,23 @@ async function processEmailJob(job: Job<EmailJobData>, token?: string): Promise<
     });
 
     const previewUrl = nodemailer.getTestMessageUrl(info);
+    const sentAt = new Date();
 
     // Update DB record on success
     await prisma.email.update({
       where: { id: email.id },
       data: {
         status: 'sent',
-        sentAt: new Date(),
+        sentAt,
         error: null,
       },
+    });
+
+    // Mirror sent status in Elasticsearch
+    await indexOrUpdateEmail({
+      id: email.id,
+      status: 'sent',
+      sentAt,
     });
 
     console.log(`✅ [Worker] Email sent to ${email.recipient}`);
@@ -146,6 +194,12 @@ async function processEmailJob(job: Job<EmailJobData>, token?: string): Promise<
       },
     });
 
+    // Mirror failed status in Elasticsearch
+    await indexOrUpdateEmail({
+      id: email.id,
+      status: 'failed',
+    });
+
     // Re-throw so BullMQ registers the job failure and initiates configured retries
     throw error;
   }
@@ -153,11 +207,6 @@ async function processEmailJob(job: Job<EmailJobData>, token?: string): Promise<
 
 /**
  * BullMQ Worker instance with configured concurrency and queue-wide limiter.
- *
- * NOTE ON LIMITER:
- * This BullMQ worker limiter is queue-wide, not per sender.
- * It enforces a physical minimum delay between sends across the entire queue.
- * Per-sender hourly rate limiting is enforced separately and dynamically via Redis Lua in rateLimiter.ts.
  */
 export const worker = new Worker<EmailJobData>(env.QUEUE_NAME, processEmailJob, {
   connection: redisConnectionOptions,
@@ -172,12 +221,19 @@ worker.on('ready', () => {
   console.log(`🟢 [BullMQ Worker] Ready and listening on queue "${env.QUEUE_NAME}"`);
 });
 
+// Block 3 Crash Safety: Handle stalled jobs
+worker.on('stalled', async (jobId: string, prev: string) => {
+  console.warn(`⚠️  [BullMQ Worker] Job ${jobId} stalled (previous state: ${prev}). Checking for stuck rows...`);
+  await recoverStuckSendingEmails();
+});
+
 worker.on('failed', (job, err) => {
   console.error(`💥 [BullMQ Worker] Job ${job?.id} failed with error:`, err.message);
 });
 
 worker.on('error', (err) => {
   console.error('💥 [BullMQ Worker] Unexpected worker error:', err);
+});
 });
 
 /**

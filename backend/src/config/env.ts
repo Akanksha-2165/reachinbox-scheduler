@@ -20,6 +20,13 @@ const envSchema = z.object({
   DEFAULT_DELAY_BETWEEN_MS: z.coerce.number().int().nonnegative().default(0),
   DEFAULT_HOURLY_LIMIT: z.coerce.number().int().positive().default(100),
   MAX_EMAILS_PER_HOUR_PER_SENDER: z.coerce.number().int().positive().default(100),
+  // Block 3: Crash safety stale threshold (ms)
+  SENDING_STALE_MS: z.coerce.number().int().positive().default(30000),
+  // Block 3: Elasticsearch node & index configuration
+  ELASTICSEARCH_NODE: z.string().default('http://localhost:9200'),
+  ELASTICSEARCH_INDEX: z.string().default('emails'),
+  // Block 3: Bull Board dashboard mount path
+  BULL_BOARD_PATH: z.string().default('/admin/queues'),
 });
 
 const parsed = envSchema.safeParse(process.env);

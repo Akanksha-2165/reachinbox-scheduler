@@ -44,9 +44,11 @@ model Email {
   error       String?     @db.Text
   hourlyLimit Int         @default(100)
   createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @default(now()) @updatedAt
 
   @@index([status])
   @@index([scheduledAt])
   @@index([senderId])
+  @@index([status, updatedAt])
   @@map("emails")
 }
