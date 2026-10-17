@@ -21,7 +21,7 @@ const envSchema = z.object({
   DEFAULT_HOURLY_LIMIT: z.coerce.number().int().positive().default(100),
   MAX_EMAILS_PER_HOUR_PER_SENDER: z.coerce.number().int().positive().default(100),
   // Block 3: Crash safety stale threshold (ms)
-  SENDING_STALE_MS: z.coerce.number().int().positive().default(30000),
+  SENDING_STALE_MS: z.coerce.number().int().positive().default(120000),
   // Block 3: Elasticsearch node & index configuration
   ELASTICSEARCH_NODE: z.string().default('http://localhost:9200'),
   ELASTICSEARCH_INDEX: z.string().default('emails'),

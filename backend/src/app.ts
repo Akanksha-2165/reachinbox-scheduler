@@ -1,17 +1,25 @@
 import express from 'express';
 import cors from 'cors';
+import { createBullBoard } from '@bull-board/api';
+import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
+import { ExpressAdapter } from '@bull-board/express';
 import { emailRouter } from './routes/emailRoutes.js';
+import { emailQueue } from './queues/emailQueue.js';
+import { env } from './config/env.js';
 
 export const app = express();
 
-// Middlewares
 app.use(cors());
 app.use(express.json());
 
-// Health check route
+// Bull Board: live view of the BullMQ queue
+const serverAdapter = new ExpressAdapter();
+serverAdapter.setBasePath(env.BULL_BOARD_PATH);
+createBullBoard({ queues: [new BullMQAdapter(emailQueue)], serverAdapter });
+app.use(env.BULL_BOARD_PATH, serverAdapter.getRouter());
+
 app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Primary email scheduler API endpoints
 app.use('/api', emailRouter);

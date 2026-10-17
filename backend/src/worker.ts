@@ -234,7 +234,7 @@ worker.on('failed', (job, err) => {
 worker.on('error', (err) => {
   console.error('💥 [BullMQ Worker] Unexpected worker error:', err);
 });
-});
+
 
 /**
  * Graceful shutdown for BullMQ worker

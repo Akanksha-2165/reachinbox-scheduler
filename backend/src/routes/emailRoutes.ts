@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
 import { emailQueue, EMAIL_JOB_NAME } from '../queues/emailQueue.js';
 import { env } from '../config/env.js';
+import { indexOrUpdateEmail, searchEmails } from '../lib/elasticsearch.js';
 
 export const emailRouter = Router();
 
@@ -118,6 +119,16 @@ emailRouter.post('/schedule', async (req: Request, res: Response): Promise<void>
         },
       });
 
+      // Mirror to Elasticsearch with full fields (worker later sends partial updates)
+      await indexOrUpdateEmail({
+        id: email.id,
+        recipient: email.recipient,
+        subject: email.subject,
+        body: email.body,
+        status: email.status,
+        scheduledAt: email.scheduledAt,
+        senderId: email.senderId,
+      });
       // 2. Compute BullMQ delay (ms relative to right now)
       // If scheduled time is in the past or now, delay is 0 (runs immediately).
       const now = Date.now();
@@ -194,6 +205,29 @@ emailRouter.get('/emails', async (req: Request, res: Response): Promise<void> =>
     console.error('Error in GET /api/emails:', error);
     res.status(500).json({
       error: 'Internal server error while fetching emails',
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+const searchQuerySchema = z.object({
+  q: z.string().optional(),
+  status: z.enum(['scheduled', 'sending', 'sent', 'failed']).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
+emailRouter.get('/search', async (req: Request, res: Response): Promise<void> => {
+  const parsed = searchQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid query parameters', details: parsed.error.flatten() });
+    return;
+  }
+  try {
+    res.status(200).json(await searchEmails(parsed.data));
+  } catch (error) {
+    console.error('Error in GET /api/search:', error);
+    res.status(503).json({
+      error: 'Search unavailable',
       message: error instanceof Error ? error.message : String(error),
     });
   }
