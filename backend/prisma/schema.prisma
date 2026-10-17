@@ -10,6 +10,7 @@ generator client {
 // Status of the email job in the scheduler pipeline
 enum EmailStatus {
   scheduled
+  sending
   sent
   failed
 }
@@ -41,6 +42,7 @@ model Email {
   sentAt      DateTime?
   status      EmailStatus @default(scheduled)
   error       String?     @db.Text
+  hourlyLimit Int         @default(100)
   createdAt   DateTime    @default(now())
 
   @@index([status])

@@ -16,8 +16,10 @@ const envSchema = z.object({
   REDIS_PASSWORD: z.string().optional().default(''),
   QUEUE_NAME: z.string().default('email-queue'),
   WORKER_CONCURRENCY: z.coerce.number().int().positive().default(5),
+  MIN_DELAY_BETWEEN_SENDS_MS: z.coerce.number().int().nonnegative().default(1000),
   DEFAULT_DELAY_BETWEEN_MS: z.coerce.number().int().nonnegative().default(0),
   DEFAULT_HOURLY_LIMIT: z.coerce.number().int().positive().default(100),
+  MAX_EMAILS_PER_HOUR_PER_SENDER: z.coerce.number().int().positive().default(100),
 });
 
 const parsed = envSchema.safeParse(process.env);

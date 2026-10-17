@@ -35,11 +35,12 @@ const scheduleEmailSchema = z.object({
     .number()
     .int()
     .positive('hourlyLimit must be > 0')
-    .default(env.DEFAULT_HOURLY_LIMIT),
+    .optional(),
+  senderId: z.string().optional(),
 });
 
 const getEmailsQuerySchema = z.object({
-  status: z.enum(['scheduled', 'sent', 'failed']).optional(),
+  status: z.enum(['scheduled', 'sending', 'sent', 'failed']).optional(),
 });
 
 /**
@@ -57,9 +58,9 @@ emailRouter.post('/schedule', async (req: Request, res: Response): Promise<void>
       return;
     }
 
-    const { subject, body, recipients, startTime, delayBetweenMs, hourlyLimit } = parseResult.data;
+    const { subject, body, recipients, startTime, delayBetweenMs, hourlyLimit, senderId } = parseResult.data;
 
-    // Fetch all active senders from DB to distribute emails across them
+    // Fetch all active senders from DB
     const senders = await prisma.sender.findMany({
       orderBy: { createdAt: 'asc' },
     });
@@ -71,7 +72,20 @@ emailRouter.post('/schedule', async (req: Request, res: Response): Promise<void>
       return;
     }
 
+    // If senderId is specified, restrict distribution to that sender
+    const poolSenders = senderId
+      ? senders.filter((s) => s.id === senderId)
+      : senders;
+
+    if (poolSenders.length === 0) {
+      res.status(400).json({
+        error: `Sender with ID "${senderId}" not found.`,
+      });
+      return;
+    }
+
     const baseStartMs = new Date(startTime).getTime();
+    const effectiveHourlyLimit = hourlyLimit ?? env.MAX_EMAILS_PER_HOUR_PER_SENDER;
     const createdEmails = [];
 
     // WHY:
@@ -80,7 +94,7 @@ emailRouter.post('/schedule', async (req: Request, res: Response): Promise<void>
     // with status=scheduled, and immediately registered as a BullMQ delayed job.
     for (let i = 0; i < recipients.length; i++) {
       const recipient = recipients[i];
-      const sender = senders[i % senders.length];
+      const sender = poolSenders[i % poolSenders.length];
 
       // Calculate staggered schedule timestamp
       const scheduledTimeMs = baseStartMs + i * delayBetweenMs;
@@ -95,6 +109,7 @@ emailRouter.post('/schedule', async (req: Request, res: Response): Promise<void>
           senderId: sender.id,
           scheduledAt,
           status: 'scheduled',
+          hourlyLimit: effectiveHourlyLimit,
         },
         include: {
           sender: {
@@ -115,7 +130,8 @@ emailRouter.post('/schedule', async (req: Request, res: Response): Promise<void>
         EMAIL_JOB_NAME,
         {
           emailId: email.id,
-          hourlyLimit,
+          hourlyLimit: effectiveHourlyLimit,
+          index: i,
         },
         {
           delay,

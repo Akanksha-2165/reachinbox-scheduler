@@ -5,6 +5,7 @@ import { redisConnectionOptions } from '../config/redis.js';
 export interface EmailJobData {
   emailId: string;
   hourlyLimit?: number;
+  index?: number;
 }
 
 export const EMAIL_JOB_NAME = 'send-email';

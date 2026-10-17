@@ -25,3 +25,5 @@ export const createRedisClient = (): Redis => {
     maxRetriesPerRequest: null,
   });
 };
+
+export const redisClient = createRedisClient();
