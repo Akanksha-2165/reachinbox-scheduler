@@ -27,6 +27,11 @@ const envSchema = z.object({
   ELASTICSEARCH_INDEX: z.string().default('emails'),
   // Block 3: Bull Board dashboard mount path
   BULL_BOARD_PATH: z.string().default('/admin/queues'),
+  GOOGLE_CLIENT_ID: z.string().default(''),
+  GOOGLE_CLIENT_SECRET: z.string().default(''),
+  GOOGLE_REDIRECT_URI: z.string().default('http://localhost:3000/api/auth/google/callback'),
+  JWT_SECRET: z.string().min(16).default('dev-only-change-me-please'),
+  FRONTEND_URL: z.string().default('http://localhost:5173'),
 });
 
 const parsed = envSchema.safeParse(process.env);

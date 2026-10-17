@@ -6,10 +6,13 @@ import { ExpressAdapter } from '@bull-board/express';
 import { emailRouter } from './routes/emailRoutes.js';
 import { emailQueue } from './queues/emailQueue.js';
 import { env } from './config/env.js';
+import cookieParser from 'cookie-parser';
+import { authRouter } from './routes/authRoutes.js';
 
 export const app = express();
 
-app.use(cors());
+app.use(cors({ origin: env.FRONTEND_URL, credentials: true }));
+app.use(cookieParser());
 app.use(express.json());
 
 // Bull Board: live view of the BullMQ queue
@@ -22,4 +25,5 @@ app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+app.use('/api/auth', authRouter);
 app.use('/api', emailRouter);

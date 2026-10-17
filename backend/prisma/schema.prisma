@@ -45,10 +45,22 @@ model Email {
   hourlyLimit Int         @default(100)
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @default(now()) @updatedAt
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id])
 
   @@index([status])
   @@index([scheduledAt])
   @@index([senderId])
   @@index([status, updatedAt])
   @@map("emails")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  googleId  String   @unique
+  email     String   @unique
+  name      String
+  avatar    String?
+  createdAt DateTime @default(now())
+  emails    Email[]
 }
