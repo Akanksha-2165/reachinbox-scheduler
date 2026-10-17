@@ -1,0 +1,50 @@
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Status of the email job in the scheduler pipeline
+enum EmailStatus {
+  scheduled
+  sent
+  failed
+}
+
+// Sender holds SMTP credentials (e.g. Ethereal Email test accounts)
+model Sender {
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  smtpHost  String
+  smtpPort  Int
+  user      String
+  pass      String
+  emails    Email[]
+  createdAt DateTime @default(now())
+
+  @@map("senders")
+}
+
+// Email stores the scheduled or sent email records
+model Email {
+  id          String      @id @default(uuid())
+  senderId    String
+  sender      Sender      @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  recipient   String
+  subject     String
+  body        String      @db.Text
+  scheduledAt DateTime
+  sentAt      DateTime?
+  status      EmailStatus @default(scheduled)
+  error       String?     @db.Text
+  createdAt   DateTime    @default(now())
+
+  @@index([status])
+  @@index([scheduledAt])
+  @@index([senderId])
+  @@map("emails")
+}
