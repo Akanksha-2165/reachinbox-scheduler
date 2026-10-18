@@ -11,6 +11,7 @@ import {
 } from './lib/rateLimiter.js';
 import { indexOrUpdateEmail } from './lib/elasticsearch.js';
 import { recoverStuckSendingEmails } from './lib/crashRecovery.js';
+import { notifySlackRateLimit } from './lib/slack.js';
 
 console.log(
   `⚙️  [BullMQ Worker] Initializing with concurrency: ${env.WORKER_CONCURRENCY}, ` +
@@ -94,6 +95,7 @@ async function processEmailJob(job: Job<EmailJobData>, token?: string): Promise<
   if (!rateResult.allowed) {
     // Notify rate limit hook (Slack integration attaches here in later blocks)
     onRateLimitHit(email.senderId, rateResult.hourWindow);
+    void notifySlackRateLimit(email.userId, email.sender.name, email.senderId, hourlyLimit, rateResult.hourWindow);
 
     // Undo counter so blocked attempt does not consume a valid quota slot
     await undoRateLimitIncrement(rateResult.rateKey);

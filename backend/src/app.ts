@@ -8,6 +8,7 @@ import { emailQueue } from './queues/emailQueue.js';
 import { env } from './config/env.js';
 import cookieParser from 'cookie-parser';
 import { authRouter } from './routes/authRoutes.js';
+import { slackRouter } from './routes/slackRoutes.js';
 
 export const app = express();
 
@@ -26,4 +27,5 @@ app.get('/health', (_req, res) => {
 });
 
 app.use('/api/auth', authRouter);
+app.use('/api/slack', slackRouter);
 app.use('/api', emailRouter);

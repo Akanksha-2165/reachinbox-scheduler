@@ -63,4 +63,15 @@ model User {
   avatar    String?
   createdAt DateTime @default(now())
   emails    Email[]
+  slack     SlackConnection?
+}
+
+model SlackConnection {
+  id         String   @id @default(uuid())
+  userId     String   @unique
+  user       User     @relation(fields: [userId], references: [id])
+  webhookUrl String   @db.Text
+  channel    String?
+  teamName   String?
+  createdAt  DateTime @default(now())
 }

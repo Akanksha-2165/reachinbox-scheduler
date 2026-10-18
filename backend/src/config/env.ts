@@ -32,6 +32,9 @@ const envSchema = z.object({
   GOOGLE_REDIRECT_URI: z.string().default('http://localhost:3000/api/auth/google/callback'),
   JWT_SECRET: z.string().min(16).default('dev-only-change-me-please'),
   FRONTEND_URL: z.string().default('http://localhost:5173'),
+  SLACK_CLIENT_ID: z.string().default(''),
+  SLACK_CLIENT_SECRET: z.string().default(''),
+  SLACK_REDIRECT_URI: z.string().default('http://localhost:3000/api/slack/callback'),
 });
 
 const parsed = envSchema.safeParse(process.env);
