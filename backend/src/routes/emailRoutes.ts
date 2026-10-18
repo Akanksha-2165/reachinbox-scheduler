@@ -4,6 +4,7 @@ import { prisma } from '../lib/prisma.js';
 import { emailQueue, EMAIL_JOB_NAME } from '../queues/emailQueue.js';
 import { env } from '../config/env.js';
 import { indexOrUpdateEmail, searchEmails } from '../lib/elasticsearch.js';
+import { requireAuth } from '../middleware/requireAuth.js';
 
 export const emailRouter = Router();
 
@@ -48,7 +49,7 @@ const getEmailsQuerySchema = z.object({
  * POST /api/schedule
  * Schedules batch emails with round-robin sender assignment and BullMQ delayed jobs.
  */
-emailRouter.post('/schedule', async (req: Request, res: Response): Promise<void> => {
+emailRouter.post('/schedule', requireAuth, async (req: Request, res: Response): Promise<void> => {
   try {
     const parseResult = scheduleEmailSchema.safeParse(req.body);
     if (!parseResult.success) {
@@ -111,6 +112,7 @@ emailRouter.post('/schedule', async (req: Request, res: Response): Promise<void>
           scheduledAt,
           status: 'scheduled',
           hourlyLimit: effectiveHourlyLimit,
+          userId: res.locals.userId,
         },
         include: {
           sender: {
@@ -128,6 +130,7 @@ emailRouter.post('/schedule', async (req: Request, res: Response): Promise<void>
         status: email.status,
         scheduledAt: email.scheduledAt,
         senderId: email.senderId,
+        userId: res.locals.userId,
       });
       // 2. Compute BullMQ delay (ms relative to right now)
       // If scheduled time is in the past or now, delay is 0 (runs immediately).
@@ -171,7 +174,7 @@ emailRouter.post('/schedule', async (req: Request, res: Response): Promise<void>
  * GET /api/emails?status=scheduled|sent
  * Retrieves emails, optionally filtered by status.
  */
-emailRouter.get('/emails', async (req: Request, res: Response): Promise<void> => {
+emailRouter.get('/emails',requireAuth, async (req: Request, res: Response): Promise<void> => {
   try {
     const queryParse = getEmailsQuerySchema.safeParse(req.query);
     if (!queryParse.success) {
@@ -185,7 +188,7 @@ emailRouter.get('/emails', async (req: Request, res: Response): Promise<void> =>
     const { status } = queryParse.data;
 
     const emails = await prisma.email.findMany({
-      where: status ? { status } : undefined,
+      where: { userId: res.locals.userId, ...(status ? { status } : {}) },
       include: {
         sender: {
           select: {
@@ -216,14 +219,14 @@ const searchQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).optional(),
 });
 
-emailRouter.get('/search', async (req: Request, res: Response): Promise<void> => {
+emailRouter.get('/search',requireAuth, async (req: Request, res: Response): Promise<void> => {
   const parsed = searchQuerySchema.safeParse(req.query);
   if (!parsed.success) {
     res.status(400).json({ error: 'Invalid query parameters', details: parsed.error.flatten() });
     return;
   }
   try {
-    res.status(200).json(await searchEmails(parsed.data));
+    res.status(200).json(await searchEmails({ ...parsed.data, userId: res.locals.userId }));
   } catch (error) {
     console.error('Error in GET /api/search:', error);
     res.status(503).json({
@@ -231,4 +234,13 @@ emailRouter.get('/search', async (req: Request, res: Response): Promise<void> =>
       message: error instanceof Error ? error.message : String(error),
     });
   }
+});
+
+emailRouter.get('/emails/counts', requireAuth, async (_req: Request, res: Response): Promise<void> => {
+  const userId = res.locals.userId;
+  const [scheduled, sent] = await Promise.all([
+    prisma.email.count({ where: { userId, status: { in: ['scheduled', 'sending'] } } }),
+    prisma.email.count({ where: { userId, status: { in: ['sent', 'failed'] } } }),
+  ]);
+  res.json({ scheduled, sent });
 });

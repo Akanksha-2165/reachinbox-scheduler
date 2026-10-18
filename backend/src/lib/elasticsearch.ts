@@ -10,6 +10,7 @@ export interface EmailDocument {
   scheduledAt?: Date | string;
   sentAt?: Date | string | null;
   senderId?: string;
+  userId?: string;
 }
 
 export interface SearchEmailsParams {
@@ -17,9 +18,11 @@ export interface SearchEmailsParams {
   status?: string;
   limit?: number;
   offset?: number;
+  userId?: string;
 }
 
 export interface SearchEmailsResult {
+  
   total: number;
   emails: EmailDocument[];
 }
@@ -71,6 +74,7 @@ export async function initElasticsearchIndex(): Promise<void> {
             scheduledAt: { type: 'date' },
             sentAt: { type: 'date' },
             senderId: { type: 'keyword' },
+            userId: { type: 'keyword' },
           },
         },
       });
@@ -120,7 +124,7 @@ export async function indexOrUpdateEmail(
 export async function searchEmails(
   params: SearchEmailsParams
 ): Promise<SearchEmailsResult> {
-  const { q, status, limit = 50, offset = 0 } = params;
+  const { q, status, userId, limit = 50, offset = 0 } = params;
 
   const must: any[] = [];
   const filter: any[] = [];
@@ -139,6 +143,10 @@ export async function searchEmails(
     filter.push({
       term: { status: status.trim() },
     });
+  }
+
+  if (userId) {
+    filter.push({ term: { userId } });
   }
 
   let query: any;
