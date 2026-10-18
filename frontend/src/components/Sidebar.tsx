@@ -1,11 +1,13 @@
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useCounts } from '../hooks/useEmails';
+import { useSlackStatus } from '../hooks/useSlack';
 
 export default function Sidebar() {
   const { user, logout } = useAuth();
   const { data: counts } = useCounts();
   const navigate = useNavigate();
+  const { data: slack } = useSlackStatus();
 
   const tab = ({ isActive }: { isActive: boolean }) =>
     `flex items-center justify-between rounded-md px-3 py-2 text-sm ${
@@ -43,6 +45,13 @@ export default function Sidebar() {
           <span className="text-xs">{counts?.sent ?? 0}</span>
         </NavLink>
       </nav>
+
+      <a
+        href="/api/slack/connect"
+        className="rounded-md border px-3 py-1.5 text-center text-sm text-gray-700 hover:bg-gray-100"
+      >
+        {slack?.connected ? `Slack connected (${slack.channel ?? 'ok'})` : 'Connect Slack'}
+      </a>
 
       <button
         onClick={logout}

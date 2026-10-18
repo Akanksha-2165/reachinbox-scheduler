@@ -20,3 +20,9 @@ export interface Counts {
   scheduled: number;
   sent: number;
 }
+
+export interface SlackStatus {
+  connected: boolean;
+  channel: string | null;
+  teamName: string | null;
+}

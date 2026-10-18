@@ -1,24 +1,14 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
+import { randomUUID } from 'crypto';
 import { prisma } from '../lib/prisma.js';
 import { emailQueue, EMAIL_JOB_NAME } from '../queues/emailQueue.js';
 import { env } from '../config/env.js';
-import { indexOrUpdateEmail, searchEmails } from '../lib/elasticsearch.js';
+import { bulkIndexEmails, searchEmails } from '../lib/elasticsearch.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 
 export const emailRouter = Router();
 
-/**
- * Validation schema for scheduling emails.
- *
- * Requirements:
- * - subject (non-empty string)
- * - body (non-empty string)
- * - recipients (array of valid emails, min 1)
- * - startTime (valid ISO date string)
- * - delayBetweenMs (non-negative integer)
- * - hourlyLimit (positive integer)
- */
 const scheduleEmailSchema = z.object({
   subject: z.string().trim().min(1, 'Subject is required'),
   body: z.string().trim().min(1, 'Body is required'),
@@ -45,9 +35,17 @@ const getEmailsQuerySchema = z.object({
   status: z.enum(['scheduled', 'sending', 'sent', 'failed']).optional(),
 });
 
+const searchQuerySchema = z.object({
+  q: z.string().optional(),
+  status: z.enum(['scheduled', 'sending', 'sent', 'failed']).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
 /**
  * POST /api/schedule
- * Schedules batch emails with round-robin sender assignment and BullMQ delayed jobs.
+ * Bulk path: 1 DB query (createMany), BullMQ addBulk in chunks, 1 ES bulk call.
+ * jobId = email id keeps idempotency; DB is the source of truth.
  */
 emailRouter.post('/schedule', requireAuth, async (req: Request, res: Response): Promise<void> => {
   try {
@@ -62,11 +60,7 @@ emailRouter.post('/schedule', requireAuth, async (req: Request, res: Response): 
 
     const { subject, body, recipients, startTime, delayBetweenMs, hourlyLimit, senderId } = parseResult.data;
 
-    // Fetch all active senders from DB
-    const senders = await prisma.sender.findMany({
-      orderBy: { createdAt: 'asc' },
-    });
-
+    const senders = await prisma.sender.findMany({ orderBy: { createdAt: 'asc' } });
     if (senders.length === 0) {
       res.status(400).json({
         error: 'No senders found in database. Run "npm run seed" first to generate Ethereal senders.',
@@ -74,92 +68,53 @@ emailRouter.post('/schedule', requireAuth, async (req: Request, res: Response): 
       return;
     }
 
-    // If senderId is specified, restrict distribution to that sender
-    const poolSenders = senderId
-      ? senders.filter((s) => s.id === senderId)
-      : senders;
-
+    const poolSenders = senderId ? senders.filter((s) => s.id === senderId) : senders;
     if (poolSenders.length === 0) {
-      res.status(400).json({
-        error: `Sender with ID "${senderId}" not found.`,
-      });
+      res.status(400).json({ error: `Sender with ID "${senderId}" not found.` });
       return;
     }
 
     const baseStartMs = new Date(startTime).getTime();
     const effectiveHourlyLimit = hourlyLimit ?? env.MAX_EMAILS_PER_HOUR_PER_SENDER;
-    const createdEmails = [];
 
-    // WHY:
-    // We loop through recipients, spreading scheduledAt by `delayBetweenMs`
-    // and round-robining across available senders. Each email is stored in DB
-    // with status=scheduled, and immediately registered as a BullMQ delayed job.
-    for (let i = 0; i < recipients.length; i++) {
-      const recipient = recipients[i];
+    const rows = recipients.map((recipient, i) => {
       const sender = poolSenders[i % poolSenders.length];
+      return {
+        id: randomUUID(),
+        recipient,
+        subject,
+        body,
+        senderId: sender.id,
+        userId: res.locals.userId as string,
+        scheduledAt: new Date(baseStartMs + i * delayBetweenMs),
+        status: 'scheduled' as const,
+        hourlyLimit: effectiveHourlyLimit,
+      };
+    });
 
-      // Calculate staggered schedule timestamp
-      const scheduledTimeMs = baseStartMs + i * delayBetweenMs;
-      const scheduledAt = new Date(scheduledTimeMs);
+    // 1. One DB query (source of truth)
+    await prisma.email.createMany({ data: rows });
 
-      // 1. Create DB row with status = scheduled
-      const email = await prisma.email.create({
-        data: {
-          recipient,
-          subject,
-          body,
-          senderId: sender.id,
-          scheduledAt,
-          status: 'scheduled',
-          hourlyLimit: effectiveHourlyLimit,
-          userId: res.locals.userId,
-        },
-        include: {
-          sender: {
-            select: { id: true, name: true, email: true },
-          },
-        },
-      });
-
-      // Mirror to Elasticsearch with full fields (worker later sends partial updates)
-      await indexOrUpdateEmail({
-        id: email.id,
-        recipient: email.recipient,
-        subject: email.subject,
-        body: email.body,
-        status: email.status,
-        scheduledAt: email.scheduledAt,
-        senderId: email.senderId,
-        userId: res.locals.userId,
-      });
-      // 2. Compute BullMQ delay (ms relative to right now)
-      // If scheduled time is in the past or now, delay is 0 (runs immediately).
-      const now = Date.now();
-      const delay = Math.max(0, scheduledTimeMs - now);
-
-      // WHY:
-      // BullMQ jobId is set strictly to `email.id`. BullMQ guarantees job ID uniqueness,
-      // ensuring that even under concurrent re-triggers or retries, duplicate jobs cannot be created.
-      await emailQueue.add(
-        EMAIL_JOB_NAME,
-        {
-          emailId: email.id,
-          hourlyLimit: effectiveHourlyLimit,
-          index: i,
-        },
-        {
-          delay,
-          jobId: email.id, // Idempotency via DB primary key
-        }
+    // 2. BullMQ delayed jobs in chunks, jobId = email id (idempotent)
+    const CHUNK = 500;
+    const nowMs = Date.now();
+    for (let c = 0; c < rows.length; c += CHUNK) {
+      const chunk = rows.slice(c, c + CHUNK);
+      await emailQueue.addBulk(
+        chunk.map((row, j) => ({
+          name: EMAIL_JOB_NAME,
+          data: { emailId: row.id, hourlyLimit: effectiveHourlyLimit, index: c + j },
+          opts: { delay: Math.max(0, row.scheduledAt.getTime() - nowMs), jobId: row.id },
+        }))
       );
-
-      createdEmails.push(email);
     }
 
+    // 3. One ES bulk call (failure is logged, never breaks scheduling)
+    await bulkIndexEmails(rows.map((r) => ({ ...r })));
+
     res.status(201).json({
-      message: `Successfully scheduled ${createdEmails.length} email(s)`,
-      count: createdEmails.length,
-      emails: createdEmails,
+      message: `Successfully scheduled ${rows.length} email(s)`,
+      count: rows.length,
     });
   } catch (error) {
     console.error('Error in POST /api/schedule:', error);
@@ -172,9 +127,8 @@ emailRouter.post('/schedule', requireAuth, async (req: Request, res: Response): 
 
 /**
  * GET /api/emails?status=scheduled|sent
- * Retrieves emails, optionally filtered by status.
  */
-emailRouter.get('/emails',requireAuth, async (req: Request, res: Response): Promise<void> => {
+emailRouter.get('/emails', requireAuth, async (req: Request, res: Response): Promise<void> => {
   try {
     const queryParse = getEmailsQuerySchema.safeParse(req.query);
     if (!queryParse.success) {
@@ -190,17 +144,9 @@ emailRouter.get('/emails',requireAuth, async (req: Request, res: Response): Prom
     const emails = await prisma.email.findMany({
       where: { userId: res.locals.userId, ...(status ? { status } : {}) },
       include: {
-        sender: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-          },
-        },
+        sender: { select: { id: true, name: true, email: true } },
       },
-      orderBy: {
-        scheduledAt: 'asc',
-      },
+      orderBy: { scheduledAt: 'asc' },
     });
 
     res.status(200).json(emails);
@@ -212,14 +158,8 @@ emailRouter.get('/emails',requireAuth, async (req: Request, res: Response): Prom
     });
   }
 });
-const searchQuerySchema = z.object({
-  q: z.string().optional(),
-  status: z.enum(['scheduled', 'sending', 'sent', 'failed']).optional(),
-  limit: z.coerce.number().int().min(1).max(200).optional(),
-  offset: z.coerce.number().int().min(0).optional(),
-});
 
-emailRouter.get('/search',requireAuth, async (req: Request, res: Response): Promise<void> => {
+emailRouter.get('/search', requireAuth, async (req: Request, res: Response): Promise<void> => {
   const parsed = searchQuerySchema.safeParse(req.query);
   if (!parsed.success) {
     res.status(400).json({ error: 'Invalid query parameters', details: parsed.error.flatten() });

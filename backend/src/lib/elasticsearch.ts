@@ -198,3 +198,19 @@ export async function searchEmails(
     emails,
   };
 }
+
+export async function bulkIndexEmails(docs: EmailDocument[]): Promise<void> {
+  if (docs.length === 0) return;
+  try {
+    const operations = docs.flatMap((d) => [
+      { update: { _index: env.ELASTICSEARCH_INDEX, _id: d.id } },
+      { doc: d, doc_as_upsert: true },
+    ]);
+    await esClient.bulk({ operations, refresh: true });
+  } catch (error) {
+    console.warn(
+      '⚠️  [Elasticsearch] Bulk index failed (ES may be offline):',
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+}
